@@ -1,10 +1,12 @@
 import httpx
 import json
 import itertools
+import asyncio
+import structlog
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from ..core.config import settings
-import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = structlog.get_logger()
@@ -291,6 +293,9 @@ class GitHubService:
         if top_repos:
             readme = await GitHubService.fetch_readme(client, username, top_repos[0]["name"])
 
+        # 5. Activity Scraper Fallback (No Token)
+        activity_data = await GitHubService._scrape_activity(client, username)
+
         return {
             "login": username,
             "name": profile.get("name") or username,
@@ -302,16 +307,66 @@ class GitHubService:
             "repo_summaries": repo_summaries,
             "readme": readme,
             "recent_commits": [],
-            "total_contributions_last_year": 0,
-            "total_commits": 0,
+            "total_contributions_last_year": activity_data["total"],
+            "total_commits": int(activity_data["total"] * 0.7), # Estimation
             "total_prs_made": 0,
             "total_issues": 0,
-            "active_weeks": 0,
-            "activity_level": "Unknown",
+            "active_weeks": activity_data["active_weeks"],
+            "activity_level": activity_data["level"],
             "oss_pr_count": 0,
             "oss_repos": [],
-            "data_source": "rest",
+            "data_source": "rest+scraped",
         }
+
+    @staticmethod
+    async def _scrape_activity(client: httpx.AsyncClient, username: str) -> Dict[str, Any]:
+        """Scrape the contributions calendar for total contributions and active weeks."""
+        try:
+            url = f"https://github.com/users/{username}/contributions"
+            resp = await client.get(url, timeout=10)
+            if resp.status_code != 200:
+                return {"total": 0, "active_weeks": 0, "level": "Unknown"}
+            
+            soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # Find total contributions text (e.g., "500 contributions in the last year")
+            h2 = soup.find("h2", class_="f4 text-normal mb-2")
+            total = 0
+            if h2:
+                text = h2.get_text(separator=" ", strip=True)
+                # Extract number
+                parts = text.split()
+                if parts:
+                    total_str = parts[0].replace(",", "")
+                    if total_str.isdigit():
+                        total = int(total_str)
+            
+            # Find active weeks (count rects with count > 0)
+            # GitHub uses data-count or data-level
+            rects = soup.find_all("td", class_="ContributionCalendar-day")
+            if not rects:
+                # Handle newer GitHub UI table cells
+                rects = soup.find_all("tool-tip") # Some versions use tooltips for counts
+            
+            # Simplified: just count non-zero levels in svg cells
+            active_days = 0
+            # Modern GitHub uses <rect data-level="1">
+            rects = soup.find_all("rect", class_="ContributionCalendar-day")
+            for r in rects:
+                level = r.get("data-level", "0")
+                if level != "0":
+                    active_days += 1
+            
+            # Rough estimate of active weeks
+            active_weeks = min(52, max(0, active_days // 3 + (1 if active_days % 3 > 0 else 0))) if active_days > 0 else 0
+            if total > 0 and active_weeks == 0: active_weeks = 1 # Safety
+            
+            level = _compute_activity_level(total, active_weeks)
+            
+            return {"total": total, "active_weeks": active_weeks, "level": level}
+        except Exception as e:
+            logger.warning("contribution_scrape_failed", username=username, error=str(e))
+            return {"total": 0, "active_weeks": 0, "level": "Unknown"}
 
     @staticmethod
     async def fetch_readme(client: httpx.AsyncClient, username: str, repo_name: str) -> str:

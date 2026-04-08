@@ -43,7 +43,7 @@ export default function Results() {
     );
   }
 
-  const scoreColor = result.maturity_score >= 75 ? "#10B981" : result.maturity_score >= 50 ? "#F59E0B" : "#EF4444";
+  const scoreColor = result.maturity_score >= 7.5 ? "#10B981" : result.maturity_score >= 5.0 ? "#F59E0B" : "#EF4444";
 
   return (
     <div className="size-full min-h-screen overflow-y-auto bg-gradient-to-br from-[#1A0B2E] via-[#3B0764] to-[#701A75] pb-20">
