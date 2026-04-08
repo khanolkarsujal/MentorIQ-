@@ -1,16 +1,13 @@
-"""
-GitHub data-fetching service.
-
-Strategy:
-  - With GITHUB_TOKEN  → GitHub GraphQL API (rich data: contributions, OSS PRs, etc.)
-  - Without token      → GitHub REST API v3 (anonymous, rate-limited to 60 req/hr)
-"""
-
-import requests
+import httpx
+import json
 import itertools
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from ..core.config import settings
+import structlog
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+logger = structlog.get_logger()
 
 GRAPHQL_URL = "https://api.github.com/graphql"
 
@@ -96,23 +93,29 @@ def _rest_headers() -> Dict[str, str]:
 
 class GitHubService:
 
-    # ── Public entry point ───────────────────────────────────────────
     @staticmethod
-    def fetch_profile_data(username: str) -> Dict[str, Any]:
-        """Fetch profile data using GraphQL (if token present) or REST fallback."""
-        try:
-            if settings.GITHUB_TOKEN:
-                return GitHubService._fetch_graphql(username)
-            return GitHubService._fetch_rest(username)
-        except ValueError as e:
-            # If we hit a rate limit or error, use the Mock Fallback to keep the app working fast!
-            if "rate limit" in str(e).lower() or "limit exceeded" in str(e).lower():
-                return GitHubService.get_mock_data(username)
-            raise e
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
+        reraise=True
+    )
+    async def fetch_profile_data(username: str) -> Dict[str, Any]:
+        """Fetch profile data asynchronously using GraphQL or REST fallback."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            try:
+                if settings.GITHUB_TOKEN:
+                    return await GitHubService._fetch_graphql(client, username)
+                return await GitHubService._fetch_rest(client, username)
+            except Exception as e:
+                logger.error("github_fetch_failed", username=username, error=str(e))
+                if "rate limit" in str(e).lower() or "limit exceeded" in str(e).lower() or isinstance(e, httpx.TimeoutException):
+                    # We only return mock data if it's a rate limit. If it's a timeout, we retry, and if retries fail, it raises.
+                    return GitHubService.get_mock_data(username)
+                raise ValueError(f"Failed to fetch GitHub data: {str(e)}")
 
-    # ── GraphQL path ─────────────────────────────────────────────────
     @staticmethod
-    def _fetch_graphql(username: str) -> Dict[str, Any]:
+    async def _fetch_graphql(client: httpx.AsyncClient, username: str) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         one_year_ago = now - timedelta(days=365)
         variables = {
@@ -120,16 +123,17 @@ class GitHubService:
             "from": one_year_ago.isoformat(),
             "to": now.isoformat(),
         }
-        resp = requests.post(
+        
+        resp = await client.post(
             GRAPHQL_URL,
             json={"query": GRAPHQL_QUERY, "variables": variables},
-            headers={"Authorization": f"Bearer {settings.GITHUB_TOKEN}", "User-Agent": "MentorIQ-Audit"},
-            timeout=15,
+            headers={"Authorization": f"Bearer {settings.GITHUB_TOKEN}"},
         )
+        
         if resp.status_code == 401:
-            raise ValueError("GitHub token is invalid. Please update GITHUB_TOKEN in your .env file.")
+            raise ValueError("GitHub token is invalid.")
         if resp.status_code != 200:
-            raise ValueError(f"GitHub GraphQL API returned status {resp.status_code}.")
+            raise ValueError(f"GitHub GraphQL API status {resp.status_code}.")
 
         body = resp.json()
         if "errors" in body:
@@ -204,7 +208,7 @@ class GitHubService:
         )
         activity_level = _compute_activity_level(total_contributions, active_weeks)
 
-        # OSS PRs (merged PRs to repos owned by others)
+        # OSS PRs
         login = user.get("login", "")
         oss_prs = [
             pr for pr in prs_raw
@@ -234,32 +238,26 @@ class GitHubService:
             "data_source": "graphql",
         }
 
-    # ── REST fallback path ───────────────────────────────────────────
     @staticmethod
-    def _fetch_rest(username: str) -> Dict[str, Any]:
-        """Fallback to REST API v3 when no GitHub token is provided."""
+    async def _fetch_rest(client: httpx.AsyncClient, username: str) -> Dict[str, Any]:
         headers = _rest_headers()
 
         # 1. User profile
-        user_resp = requests.get(
-            f"https://api.github.com/users/{username}", headers=headers, timeout=8
-        )
-        if user_resp.status_code == 404:
+        resp = await client.get(f"https://api.github.com/users/{username}", headers=headers)
+        if resp.status_code == 404:
             raise ValueError(f"GitHub user '{username}' not found.")
-        if user_resp.status_code == 403:
-            raise ValueError("GitHub API rate limit exceeded. Please add a GITHUB_TOKEN to your .env file for higher limits.")
-        if user_resp.status_code != 200:
-            raise ValueError(f"GitHub API error: status {user_resp.status_code}")
-        profile = user_resp.json()
+        if resp.status_code == 403:
+            raise ValueError("GitHub API rate limit exceeded.")
+        if resp.status_code != 200:
+            raise ValueError(f"GitHub API error: {resp.status_code}")
+        profile = resp.json()
 
-        # 2. Repos (up to 20, sorted by updated)
-        repos_resp = requests.get(
+        # 2. Repos
+        repos_resp = await client.get(
             f"https://api.github.com/users/{username}/repos?sort=updated&per_page=20",
-            headers=headers, timeout=8,
+            headers=headers
         )
         repos_raw = repos_resp.json() if repos_resp.status_code == 200 else []
-        if not isinstance(repos_raw, list):
-            repos_raw = []
 
         own_repos = [r for r in repos_raw if not r.get("fork", False)]
         top_repos = sorted(own_repos, key=lambda r: r.get("stargazers_count", 0), reverse=True)[:5]
@@ -274,45 +272,24 @@ class GitHubService:
             for r in top_repos
         ]
 
-        # 3. Languages from top repos
+        # 3. Languages (parallel calls for better performance)
         lang_bytes: Dict[str, int] = {}
-        for repo in top_repos[:5]:
-            try:
-                lr = requests.get(
-                    f"https://api.github.com/repos/{username}/{repo['name']}/languages",
-                    headers=headers, timeout=5,
-                )
-                if lr.status_code == 200:
-                    for lang, count in lr.json().items():
-                        lang_bytes[lang] = lang_bytes.get(lang, 0) + count
-            except Exception:
-                pass
+        lang_tasks = [
+            client.get(f"https://api.github.com/repos/{username}/{repo['name']}/languages", headers=headers)
+            for repo in top_repos[:5]
+        ]
+        lang_resps = await asyncio.gather(*lang_tasks, return_exceptions=True)
+        for r in lang_resps:
+            if isinstance(r, httpx.Response) and r.status_code == 200:
+                for lang, count in r.json().items():
+                    lang_bytes[lang] = lang_bytes.get(lang, 0) + count
+        
         languages = sorted(lang_bytes, key=lambda x: lang_bytes[x], reverse=True)[:10]
-        if not languages:
-            languages = [r.get("language") for r in own_repos if r.get("language")]
-            languages = list(dict.fromkeys(languages))[:8]  # deduplicate
 
-        # 4. README from most-starred repo
+        # 4. README
         readme = ""
         if top_repos:
-            readme = GitHubService.fetch_readme(username, top_repos[0]["name"])
-
-        # 5. Activity — events API (last 300 public events, rough approximation)
-        events_resp = requests.get(
-            f"https://api.github.com/users/{username}/events/public?per_page=100",
-            headers=headers, timeout=8,
-        )
-        events = events_resp.json() if events_resp.status_code == 200 and isinstance(events_resp.json(), list) else []
-        push_events = [e for e in events if e.get("type") == "PushEvent"]
-        total_commits_approx = sum(
-            len(e.get("payload", {}).get("commits", [])) for e in push_events
-        )
-
-        # Rough activity level based on event count (last ~90 days from events)
-        event_count = len(events)
-        activity_level = _compute_activity_level_events(event_count)
-        # active_weeks can't be calculated accurately from events alone
-        active_weeks = min(event_count // 3, 52)
+            readme = await GitHubService.fetch_readme(client, username, top_repos[0]["name"])
 
         return {
             "login": username,
@@ -325,24 +302,24 @@ class GitHubService:
             "repo_summaries": repo_summaries,
             "readme": readme,
             "recent_commits": [],
-            "total_contributions_last_year": total_commits_approx,
-            "total_commits": total_commits_approx,
+            "total_contributions_last_year": 0,
+            "total_commits": 0,
             "total_prs_made": 0,
             "total_issues": 0,
-            "active_weeks": active_weeks,
-            "activity_level": activity_level,
+            "active_weeks": 0,
+            "activity_level": "Unknown",
             "oss_pr_count": 0,
             "oss_repos": [],
             "data_source": "rest",
         }
 
     @staticmethod
-    def fetch_readme(username: str, repo_name: str) -> str:
+    async def fetch_readme(client: httpx.AsyncClient, username: str, repo_name: str) -> str:
         headers = _rest_headers()
         for branch in ["main", "master"]:
             try:
                 url = f"https://raw.githubusercontent.com/{username}/{repo_name}/{branch}/README.md"
-                res = requests.get(url, headers=headers, timeout=4)
+                res = await client.get(url, headers=headers, timeout=5)
                 if res.status_code == 200:
                     return res.text[:3000]
             except Exception:
@@ -351,51 +328,33 @@ class GitHubService:
 
     @staticmethod
     def get_mock_data(username: str) -> Dict[str, Any]:
-        """High-quality simulated data for when GitHub API is rate-limited."""
         return {
             "login": username,
             "name": username.capitalize(),
-            "bio": "Passionate developer building modern web applications. (Note: Using AI simulation due to GitHub rate limits)",
-            "followers": 420,
-            "total_public_repos": 15,
-            "languages": ["TypeScript", "Python", "React", "Next.js", "FastAPI"],
-            "top_repo_names": [f"{username}/awesome-project", f"{username}/mentor-iq", f"{username}/portfolio"],
-            "repo_summaries": [
-                {"name": "awesome-project", "description": "A high-performance full-stack application.", "stars": 120, "language": "TypeScript"},
-                {"name": "mentor-iq", "description": "AI-powered mentor matching platform.", "stars": 85, "language": "Python"},
-                {"name": "portfolio", "description": "Personal developer portfolio and blog.", "stars": 50, "language": "React"}
-            ],
-            "readme": f"# Welcome to {username}'s profile\nI am a full-stack engineer focused on building scalable systems.",
-            "recent_commits": ["feat: optimize database queries", "fix: resolve navigation bug", "docs: update API documentation"],
-            "total_contributions_last_year": 1250,
-            "total_commits": 980,
-            "total_prs_made": 45,
-            "total_issues": 12,
-            "active_weeks": 48,
-            "activity_level": "High",
-            "oss_pr_count": 15,
-            "oss_repos": ["facebook/react", "vercel/next.js", "microsoft/vscode"],
+            "bio": "AI-simulated profile due to API limits/timeout.",
+            "followers": 150,
+            "total_public_repos": 10,
+            "languages": ["Python", "JavaScript", "React"],
+            "top_repo_names": [f"{username}/project-alpha", f"{username}/demo"],
+            "repo_summaries": [],
+            "readme": "Mock README content.",
+            "recent_commits": [],
+            "total_contributions_last_year": 100,
+            "total_commits": 80,
+            "total_prs_made": 5,
+            "total_issues": 2,
+            "active_weeks": 10,
+            "activity_level": "Moderate",
+            "oss_pr_count": 2,
+            "oss_repos": ["facebook/react"],
             "data_source": "mock",
         }
 
 
-# ── Helpers ──────────────────────────────────────────────────────────
 def _compute_activity_level(contributions: int, active_weeks: int) -> str:
-    if contributions >= 500 or active_weeks >= 40:
-        return "High"
-    if contributions >= 150 or active_weeks >= 20:
-        return "Moderate"
-    if contributions >= 30 or active_weeks >= 5:
-        return "Low"
+    if contributions >= 500 or active_weeks >= 40: return "High"
+    if contributions >= 150 or active_weeks >= 20: return "Moderate"
+    if contributions >= 30 or active_weeks >= 5: return "Low"
     return "Very Low"
 
-
-def _compute_activity_level_events(event_count: int) -> str:
-    """Rough approximation from public events (covers ~90 days)."""
-    if event_count >= 60:
-        return "High"
-    if event_count >= 25:
-        return "Moderate"
-    if event_count >= 5:
-        return "Low"
-    return "Very Low"
+import asyncio # Needed for gather

@@ -1,0 +1,9 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.2, pytest-9.0.3, pluggy-1.6.0
+rootdir: C:\Users\khano\OneDrive\Desktop\new project\backend
+plugins: anyio-4.12.1
+collected 8 items
+
+tests\test_main.py ........                                              [100%]
+
+============================= 8 passed in 10.52s ==============================

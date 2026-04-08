@@ -1,8 +1,9 @@
 fastapi
 uvicorn
-requests
+httpx
 python-dotenv
 openai
+instructor
 beautifulsoup4
 pydantic
 pydantic-settings
@@ -10,3 +11,9 @@ pydantic[email]
 lxml
 lxml_html_clean
 gunicorn
+sqlmodel
+alembic
+structlog
+redis
+tenacity
+fastapi-limiter

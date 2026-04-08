@@ -1,87 +1,76 @@
-import sqlite3
+import json
 import os
-from typing import List, Dict, Any
 from pathlib import Path
+from typing import List, Dict, Any, Optional
+from sqlmodel import SQLModel, create_engine, Session, select, col
+from .models import Mentor
+import structlog
 
-# Updated for SaaS structure: Looks for DB in backend/ root
+logger = structlog.get_logger()
+
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "mentors.db"
+sqlite_url = f"sqlite:///{DB_PATH}"
+
+engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
 
 def init_db():
-    # Ensure directory exists (though it should in backend/)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SQLModel.metadata.create_all(engine)
     
-    conn = sqlite3.connect(str(DB_PATH))
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS mentors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            company TEXT,
-            title TEXT,
-            avatar_url TEXT,
-            tech_stack TEXT -- Comma separated
-        )
-    ''')
-    
-    # Simple check for existing data
-    cursor.execute("SELECT COUNT(*) FROM mentors")
-    if cursor.fetchone()[0] == 0:
-        seed_mentors(conn)
+    with Session(engine) as session:
+        statement = select(Mentor)
+        results = session.exec(statement).first()
+        if not results:
+            seed_mentors(session)
+
+def seed_mentors(session: Session):
+    json_path = Path(__file__).parent / "seed_mentors.json"
+    if not json_path.exists():
+        logger.warning("seed_file_missing", path=str(json_path))
+        return
+
+    try:
+        with open(json_path, "r") as f:
+            mentors_data = json.load(f)
+            
+        for m in mentors_data:
+            mentor = Mentor(
+                name=m[0],
+                company=m[1],
+                title=m[2],
+                avatar_url=m[3],
+                tech_stack=m[4]
+            )
+            session.add(mentor)
+        session.commit()
+        logger.info("db_seeded", count=len(mentors_data))
+    except Exception as e:
+        logger.error("db_seed_failed", error=str(e))
+
+def find_best_mentors(target_title: str, user_tools: List[str], limit: int = 1) -> List[Dict[str, Any]]:
+    """Score mentors based on tech stack overlap and title relevance."""
+    with Session(engine) as session:
+        statement = select(Mentor)
+        mentors = session.exec(statement).all()
         
-    conn.commit()
-    conn.close()
-
-def seed_mentors(conn):
-    mentors = [
-        ("David Henderson", "Google", "Senior Staff Engineer (Python/ML)", "https://api.dicebear.com/7.x/avataaars/svg?seed=david", "Python,FastAPI,SQL,Docker,Kubernetes"),
-        ("Alice Chen", "Netflix", "Engineering Manager (Distributed Systems)", "https://api.dicebear.com/7.x/avataaars/svg?seed=alice", "Microservices,Cassandra,System Design,Go,Java"),
-        ("Rohan Sharma", "Meta", "Senior Machine Learning Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=rohan", "PyTorch,TensorFlow,Numpy,Python,Scikit-learn"),
-        ("Sarah Jenkins", "Stripe", "Principal Frontend Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=sarah", "React,TypeScript,Next.js,JS,TailwindCSS"),
-        ("Kunal Nayyar", "AWS", "Cloud Architect (Serverless)", "https://api.dicebear.com/7.x/avataaars/svg?seed=kunal", "AWS,Lambda,DynamoDB,Infrastructure,Terraform"),
-        ("Elena Moreno", "Uber", "Senior Product Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=elena", "React Native,GraphQL,SQL,Node.js,Mobile"),
-        ("Sujay Bansal", "OpenAI", "ML Infrastructure Lead", "https://api.dicebear.com/7.x/avataaars/svg?seed=sujay", "GPU,PyTorch,Scale,Python,Ray,CUDA"),
-        ("Nishant Gunjal", "Microsoft", "Principal Software Engineer (Azure Core)", "https://api.dicebear.com/7.x/avataaars/svg?seed=nish", "Azure,Dotnet,C#,SQL,Distributed Systems"),
-        ("Meera Thakur", "Apple", "Senior Embedded Systems Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=meera", "C,C++,Rust,Embedded,RTOS"),
-        ("Tanay Pratap", "Spotify", "Senior Backend Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=tanay", "Java,SpringBoot,Kafka,BigData,PostgreSQL"),
-        ("Marcus Thorne", "Citadel", "Quantitative Software Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=marcus", "C++,Python,Low Latency,Algorithms"),
-        ("Priya Das", "Airbnb", "Staff Software Engineer (Payments)", "https://api.dicebear.com/7.x/avataaars/svg?seed=priya", "Ruby,Rails,Java,Kafka,System Design"),
-        ("Liam O'Connor", "Vercel", "Head of Developer Relations", "https://api.dicebear.com/7.x/avataaars/svg?seed=liam", "Next.js,React,Edge,JavaScript,Performance"),
-        ("Fatima Zahra", "GitLab", "DevOps Engineering Lead", "https://api.dicebear.com/7.x/avataaars/svg?seed=fatima", "Git,CI/CD,Go,Terraform,Kubernetes"),
-        ("Hiroshi Tanaka", "Sony", "Senior Security Researcher", "https://api.dicebear.com/7.x/avataaars/svg?seed=hiroshi", "Security,C,Python,Networking,Exploit"),
-        ("Chloe Bell", "Discord", "Staff Backend Engineer (Elixir)", "https://api.dicebear.com/7.x/avataaars/svg?seed=chloe", "Elixir,Erlang,Websockets,Realtime"),
-        ("Arjun Reddy", "DoorDash", "Senior Data Scientist (Dispatch)", "https://api.dicebear.com/7.x/avataaars/svg?seed=arjun", "Python,Pandas,ML,Stats,Optimized"),
-        ("Sofia Rossi", "Cloudflare", "Systems Engineer (Edge Networking)", "https://api.dicebear.com/7.x/avataaars/svg?seed=sofia", "Rust,Go,Networking,WASM,Linux"),
-        ("Kevin Zhang", "Roblox", "Principal Game Engine Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=kevin", "C++,Graphics,Vulkan,Physics,Math"),
-        ("Aisha Diallo", "Coinbase", "Senior Blockchain Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=aisha", "Solidity,Go,Ethereum,Cryptography"),
-        ("Oliver Schmidt", "SAP", "Principal Enterprise Architect", "https://api.dicebear.com/7.x/avataaars/svg?seed=oliver", "Java,SAP,Cloud,Kubernetes,ERP"),
-        ("Maya Gupta", "LinkedIn", "Senior Data Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=maya", "Spark,Scala,Airflow,DataLake,Python"),
-        ("James Wilson", "Meta", "Senior Full Stack Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=james", "React,Node.js,GraphQL,Relay,Python"),
-        ("Amelia Watson", "Palantir", "Forward Deployed Engineer", "https://api.dicebear.com/7.x/avataaars/svg?seed=amelia", "Python,PostgreSQL,React,BigData"),
-        ("Lucas Silva", "Docker", "Maintainer & Core contributor", "https://api.dicebear.com/7.x/avataaars/svg?seed=lucas", "Go,Docker,Containers,Linux,Containerd")
-    ]
-    conn.executemany("INSERT INTO mentors (name, company, title, avatar_url, tech_stack) VALUES (?,?,?,?,?)", mentors)
-
-def find_best_mentors(target_title: str, user_tools: list, limit: int = 1) -> List[Dict[str, Any]]:
-    # Open connection to the dynamic path
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM mentors")
-    mentors = cursor.fetchall()
-    conn.close()
-
     scored = []
-    title_words = target_title.lower().split() if target_title else []
-    
+    title_words = set(target_title.lower().split()) if target_title else set()
+    user_tools_set = set(t.lower() for t in user_tools)
+
     for m in mentors:
         score = 0
-        m_stack = m['tech_stack'].split(',') if m['tech_stack'] else []
-        overlap = set(m_stack).intersection(set(user_tools))
+        m_tech = set(t.lower().strip() for t in m.tech_stack.split(",")) if m.tech_stack else set()
+        
+        # Tech stack overlap (Weight: 3 per match)
+        overlap = m_tech.intersection(user_tools_set)
         score += len(overlap) * 3
-        m_title = m['title'].lower()
+        
+        # Title relevance (Weight: 2 per match)
+        m_title_lower = m.title.lower() if m.title else ""
         for word in title_words:
-            if word in m_title:
+            if word in m_title_lower:
                 score += 2
+        
         scored.append((score, m))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -89,10 +78,14 @@ def find_best_mentors(target_title: str, user_tools: list, limit: int = 1) -> Li
     results = []
     for s, m in scored[:limit]:
         results.append({
-            "name": m['name'],
-            "company": m['company'],
-            "title": m['title'],
-            "avatar_url": m['avatar_url'],
-            "tech_stack": m['tech_stack'].split(',')
+            "name": m.name,
+            "company": m.company,
+            "title": m.title,
+            "avatar_url": m.avatar_url,
+            "tech_stack": m.get_tech_stack()
         })
     return results
+
+def get_session():
+    with Session(engine) as session:
+        yield session
