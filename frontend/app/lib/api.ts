@@ -1,4 +1,5 @@
-const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+/// <reference types="vite/client" />
+const rawUrl = (import.meta as any).env.VITE_API_URL || "http://localhost:8000";
 // Professional sanitization: Remove any trailing slashes to prevent double-slash errors in fetches
 const BASE_URL = rawUrl.replace(/\/+$/, "");
 
