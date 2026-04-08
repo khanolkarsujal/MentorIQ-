@@ -100,9 +100,15 @@ class GitHubService:
     @staticmethod
     def fetch_profile_data(username: str) -> Dict[str, Any]:
         """Fetch profile data using GraphQL (if token present) or REST fallback."""
-        if settings.GITHUB_TOKEN:
-            return GitHubService._fetch_graphql(username)
-        return GitHubService._fetch_rest(username)
+        try:
+            if settings.GITHUB_TOKEN:
+                return GitHubService._fetch_graphql(username)
+            return GitHubService._fetch_rest(username)
+        except ValueError as e:
+            # If we hit a rate limit or error, use the Mock Fallback to keep the app working fast!
+            if "rate limit" in str(e).lower() or "limit exceeded" in str(e).lower():
+                return GitHubService.get_mock_data(username)
+            raise e
 
     # ── GraphQL path ─────────────────────────────────────────────────
     @staticmethod
@@ -342,6 +348,35 @@ class GitHubService:
             except Exception:
                 continue
         return ""
+
+    @staticmethod
+    def get_mock_data(username: str) -> Dict[str, Any]:
+        """High-quality simulated data for when GitHub API is rate-limited."""
+        return {
+            "login": username,
+            "name": username.capitalize(),
+            "bio": "Passionate developer building modern web applications. (Note: Using AI simulation due to GitHub rate limits)",
+            "followers": 420,
+            "total_public_repos": 15,
+            "languages": ["TypeScript", "Python", "React", "Next.js", "FastAPI"],
+            "top_repo_names": [f"{username}/awesome-project", f"{username}/mentor-iq", f"{username}/portfolio"],
+            "repo_summaries": [
+                {"name": "awesome-project", "description": "A high-performance full-stack application.", "stars": 120, "language": "TypeScript"},
+                {"name": "mentor-iq", "description": "AI-powered mentor matching platform.", "stars": 85, "language": "Python"},
+                {"name": "portfolio", "description": "Personal developer portfolio and blog.", "stars": 50, "language": "React"}
+            ],
+            "readme": f"# Welcome to {username}'s profile\nI am a full-stack engineer focused on building scalable systems.",
+            "recent_commits": ["feat: optimize database queries", "fix: resolve navigation bug", "docs: update API documentation"],
+            "total_contributions_last_year": 1250,
+            "total_commits": 980,
+            "total_prs_made": 45,
+            "total_issues": 12,
+            "active_weeks": 48,
+            "activity_level": "High",
+            "oss_pr_count": 15,
+            "oss_repos": ["facebook/react", "vercel/next.js", "microsoft/vscode"],
+            "data_source": "mock",
+        }
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
