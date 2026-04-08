@@ -9,3 +9,4 @@ pydantic-settings
 pydantic[email]
 lxml
 lxml_html_clean
+gunicorn
