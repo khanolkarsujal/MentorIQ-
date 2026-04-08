@@ -1,0 +1,28 @@
+# ─── Python / Backend ────────────────────────────────────────────────────────
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/*.pyc
+backend/*.pyo
+backend/mentors.db
+backend/test_output.json
+
+# ─── Node / Frontend ─────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+
+# Root node_modules (if any)
+node_modules/
+
+# ─── Environment secrets ──────────────────────────────────────────────────────
+.env
+backend/.env
+frontend/.env
+
+# ─── OS / editor ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+*.log

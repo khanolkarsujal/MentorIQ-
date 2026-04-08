@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+requests
+python-dotenv
+openai
+beautifulsoup4
+pydantic
+pydantic-settings
+pydantic[email]
+lxml
+lxml_html_clean

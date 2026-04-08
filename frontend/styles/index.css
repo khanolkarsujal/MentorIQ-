@@ -1,0 +1,23 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+@layer base {
+  body {
+    @apply antialiased font-sans bg-[#F8FAFC] text-[#1E293B];
+    font-family: 'Plus Jakarta Sans', sans-serif;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Outfit', sans-serif;
+    @apply tracking-tight font-bold;
+  }
+}
+
+@layer components {
+  .premium-card {
+    @apply bg-white rounded-[3rem] shadow-2xl p-10 border border-gray-100;
+  }
+  .premium-button {
+    @apply px-10 py-5 rounded-full font-black transition-all hover:scale-105 active:scale-95 shadow-xl disabled:opacity-50;
+  }
+}
