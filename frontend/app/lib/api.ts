@@ -1,4 +1,6 @@
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// Professional sanitization: Remove any trailing slashes to prevent double-slash errors in fetches
+const BASE_URL = rawUrl.replace(/\/+$/, "");
 
 export interface AnalysisResult {
   status: string;
@@ -31,6 +33,7 @@ export interface AnalysisResult {
 }
 
 export async function analyzeProfile(username: string): Promise<AnalysisResult> {
+  // We ensure the slash is exactly where it should be
   const res = await fetch(`${BASE_URL}/api/analyze?username=${encodeURIComponent(username)}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Unknown error" }));
