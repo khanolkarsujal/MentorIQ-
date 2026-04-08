@@ -89,18 +89,51 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": "Invalid Request Parameters", "errors": exc.errors(), "status": "error"}
     )
 
-# 6. Root health-check
+# 6. OpenAPI Metadata
+tags_metadata = [
+    {"name": "Health", "description": "System health and status monitoring."},
+    {"name": "Analysis", "description": "Core AI audit and mentor matchmaking logic."},
+]
+
+app.openapi_tags = tags_metadata
+
+# 7. Root health-check (World Class Observability)
 @app.get("/", tags=["Health"])
 async def read_root():
+    """Detailed health check validating system components."""
+    # Check Redis
+    redis_alive = False
+    if cache_service.redis:
+        try:
+            await cache_service.redis.ping()
+            redis_alive = True
+        except:
+            pass
+            
+    # Check DB (SQLModel engine)
+    db_alive = False
+    try:
+        from sqlmodel import text
+        with database.get_session() as session:
+            session.exec(text("SELECT 1"))
+            db_alive = True
+    except:
+        pass
+
     return {
         "name": "MentorIQ API",
         "version": "3.0.0",
-        "status": "online",
+        "status": "online" if (db_alive and (not settings.REDIS_URL or redis_alive)) else "degraded",
+        "infrastructure": {
+            "database": "online" if db_alive else "offline",
+            "redis": "online" if redis_alive else ("disabled" if not settings.REDIS_URL else "offline"),
+            "environment": settings.ENV
+        },
         "docs": "/api/docs",
     }
 
-# 7. API Routes
-app.include_router(audit_api.router, prefix=settings.API_V1_STR)
+# 8. API Routes
+app.include_router(audit_api.router, prefix=settings.API_V1_STR, tags=["Analysis"])
 
 if __name__ == "__main__":
     import uvicorn
